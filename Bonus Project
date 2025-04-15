@@ -113,7 +113,6 @@ generate_diagnostics <- function(chain, method_name, target_name) {
 run_comparison <- function(target, target_name, dim) {
   set.seed(123)
   
-  # Run all methods
   results <- list(
     rwmh = rwmh(target, dim, 10000, 1.0),
     adaptive = adaptive_mh(target, dim, 10000),
