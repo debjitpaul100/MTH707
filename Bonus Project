@@ -1,0 +1,185 @@
+##Load necessary Libraries##
+library(mvtnorm)
+library(sn)
+library(DiceKriging)
+library(coda)
+library(ggplot2)
+library(forecast)
+library(gridExtra)
+library(DiceOptim)
+
+
+### 1. Target Distributions ###
+log_banana <- function(x, b = 0.03) {
+  x_mod <- c(x[1], x[2] - b*(x[1]^2 - 100))
+  dmvnorm(x_mod, sigma = matrix(c(1,0.9,0.9,1), nrow=2), log=TRUE)
+}
+
+log_mixture <- function(x) {
+  d <- length(x)
+  log(0.5*dmvnorm(x, mean=rep(-3,d)) + 0.5*dmvnorm(x, mean=rep(3,d)))
+}
+
+log_skewnormal <- function(x, alpha=5) {
+  d <- length(x)
+  xi <- rep(0,d); Omega <- diag(d); alpha_vec <- rep(alpha,d)
+  dmsn(x, xi, Omega, alpha_vec, log=TRUE)
+}
+
+### 2. MCMC Implementations ###
+rwmh <- function(target, dim, n_iter, proposal_sd) {
+  chain <- matrix(0, nrow=n_iter, ncol=dim)
+  accepts <- 0
+  for (i in 2:n_iter) {
+    proposal <- rnorm(dim, chain[i-1,], proposal_sd)
+    log_ratio <- target(proposal) - target(chain[i-1,])
+    if (is.finite(log_ratio) && log(runif(1)) < log_ratio) {
+      chain[i,] <- proposal; accepts <- accepts + 1
+    } else chain[i,] <- chain[i-1,]
+  }
+  list(chain=chain, acceptance_rate=accepts/n_iter)
+}
+
+adaptive_mh <- function(target, dim, n_iter, init_sd=1) {
+  chain <- matrix(0, nrow=n_iter, ncol=dim)
+  Sigma <- diag(init_sd^2, dim)
+  accepts <- 0; s_d <- (2.38^2)/dim
+  for (i in 2:n_iter) {
+    if (i > 100) Sigma <- s_d * (cov(chain[1:(i-1),]) + 1e-6*diag(dim))
+    proposal <- rmvnorm(1, chain[i-1,], Sigma)
+    log_ratio <- target(proposal) - target(chain[i-1,])
+    if (is.finite(log_ratio) && log(runif(1)) < log_ratio) {
+      chain[i,] <- proposal; accepts <- accepts + 1
+    } else chain[i,] <- chain[i-1,]
+  }
+  list(chain=chain, acceptance_rate=accepts/n_iter)
+}
+
+bo_tuned_mcmc <- function(target, dim, n_iter=10000, n_bo=30) {
+  # Objective function: negative mean ESS
+  obj_fn <- function(sd) {
+    if (sd <= 0) return(Inf)  # prevent invalid proposals
+    test_chain <- rwmh(target, dim, 1000, sd)
+    -mean(effectiveSize(test_chain$chain))
+  }
+  
+  # Generate more diverse initial points
+  initial_sds <- seq(0.3, 2.5, length.out = 5)
+  responses <- sapply(initial_sds, obj_fn)
+  
+  # Fit initial GP model with nugget effect for stability
+  model <- km(
+    design = data.frame(sd = initial_sds),
+    response = responses,
+    covtype = "gauss",
+    nugget = 1e-6,
+    control = list(trace = FALSE)
+  )
+  
+  # BO loop
+  for (i in 1:n_bo) {
+    x_new <- max_EI(model, lower = 0.1, upper = 5)$par
+    y_new <- obj_fn(x_new)
+    model <- update(model, newX = data.frame(sd = x_new), newy = y_new)
+  }
+
+  best_sd <- model@X[which.min(model@y),]
+  rwmh(target, dim, n_iter, best_sd)
+}
+
+
+### 3. Diagnostics ###
+calculate_ess <- function(chain) {
+  coda::effectiveSize(chain)
+}
+
+generate_diagnostics <- function(chain, method_name, target_name) {
+  # Trace plot
+  p1 <- ggplot(data.frame(iteration=1:nrow(chain), value=chain[,1]), 
+               aes(x=iteration, y=value)) +
+    geom_line() +
+    ggtitle(paste("Trace Plot (", method_name, "on", target_name, ")"))
+  
+  # ACF plot
+  p2 <- ggAcf(chain[,1]) + 
+    ggtitle(paste("ACF (", method_name, "on", target_name, ")"))
+  
+  # ESS calculation
+  ess <- calculate_ess(chain)
+  
+  list(trace_plot=p1, acf_plot=p2, ess=ess)
+}
+
+### 4. Comparison Framework ###
+run_comparison <- function(target, target_name, dim) {
+  set.seed(123)
+  
+  # Run all methods
+  results <- list(
+    rwmh = rwmh(target, dim, 10000, 1.0),
+    adaptive = adaptive_mh(target, dim, 10000),
+    bo_tuned = bo_tuned_mcmc(target, dim)
+  )
+  
+  # Generate diagnostics
+  diags <- lapply(names(results), function(method) {
+    generate_diagnostics(results[[method]]$chain, method, target_name)
+  })
+  names(diags) <- names(results)
+  
+  # Compile metrics
+  summary_df <- data.frame(
+    Method = names(results),
+    Target = target_name,
+    Acceptance = sapply(results, function(x) x$acceptance_rate),
+    MinESS = sapply(diags, function(x) min(x$ess)),
+    MeanESS = sapply(diags, function(x) mean(x$ess)),
+    ESS_per_sec = sapply(diags, function(x) mean(x$ess)/system.time(x$ess)[3])
+  )
+  
+  list(summary = summary_df, diagnostics = diags)
+}
+
+
+### 5. Execute Comparisons ###
+results <- list(
+  banana = run_comparison(log_banana, "Banana", 2),
+  mixture = run_comparison(log_mixture, "Mixture", 5),
+  skewnormal = run_comparison(function(x) log_skewnormal(x), "Skew-Normal", 3)
+)
+
+### 6. Visualize Results ###
+
+banana_result <- run_comparison(log_banana, "Banana", 2)
+
+diags <- banana_result$diagnostics  # Now 'diags' is defined
+
+
+grid.arrange(
+  diags$rwmh$trace_plot, diags$adaptive$trace_plot, diags$bo_tuned$trace_plot,
+  diags$rwmh$acf_plot, diags$adaptive$acf_plot, diags$bo_tuned$acf_plot,
+  ncol=3
+)
+
+mixture_result = run_comparison(log_mixture, "Mixture", 5)
+
+diags2 <- mixture_result$diagnostics  # Now 'diags' is defined
+
+
+grid.arrange(
+  diags2$rwmh$trace_plot, diags2$adaptive$trace_plot, diags2$bo_tuned$trace_plot,
+  diags2$rwmh$acf_plot, diags2$adaptive$acf_plot, diags2$bo_tuned$acf_plot,
+  ncol=3
+)
+
+skewnormal_result = run_comparison(function(x) log_skewnormal(x), "Skew-Normal", 3)
+
+diags3 <- skewnormal_result$diagnostics  # Now 'diags' is defined
+
+
+grid.arrange(
+  diags3$rwmh$trace_plot, diags3$adaptive$trace_plot, diags3$bo_tuned$trace_plot,
+  diags3$rwmh$acf_plot, diags3$adaptive$acf_plot, diags3$bo_tuned$acf_plot,
+  ncol=3
+)
+
