@@ -9,7 +9,7 @@ library(gridExtra)
 library(DiceOptim)
 
 
-### 1. Target Distributions ###
+### 1. Log of Target Distributions ###
 log_banana <- function(x, b = 0.03) {
   x_mod <- c(x[1], x[2] - b*(x[1]^2 - 100))
   dmvnorm(x_mod, sigma = matrix(c(1,0.9,0.9,1), nrow=2), log=TRUE)
@@ -58,16 +58,15 @@ adaptive_mh <- function(target, dim, n_iter, init_sd=1) {
 bo_tuned_mcmc <- function(target, dim, n_iter=10000, n_bo=30) {
   # Objective function: negative mean ESS
   obj_fn <- function(sd) {
-    if (sd <= 0) return(Inf)  # prevent invalid proposals
+    if (sd <= 0) return(Inf)  
     test_chain <- rwmh(target, dim, 1000, sd)
     -mean(effectiveSize(test_chain$chain))
   }
   
-  # Generate more diverse initial points
   initial_sds <- seq(0.3, 2.5, length.out = 5)
   responses <- sapply(initial_sds, obj_fn)
   
-  # Fit initial GP model with nugget effect for stability
+  # Fit GP model with nugget effect for stability
   model <- km(
     design = data.frame(sd = initial_sds),
     response = responses,
@@ -76,7 +75,7 @@ bo_tuned_mcmc <- function(target, dim, n_iter=10000, n_bo=30) {
     control = list(trace = FALSE)
   )
   
-  # BO loop
+  # B_O loop
   for (i in 1:n_bo) {
     x_new <- max_EI(model, lower = 0.1, upper = 5)$par
     y_new <- obj_fn(x_new)
@@ -149,34 +148,27 @@ results <- list(
 )
 
 ### 6. Visualize Results ###
-
+#Banana shaped distribution
 banana_result <- run_comparison(log_banana, "Banana", 2)
-
-diags <- banana_result$diagnostics  # Now 'diags' is defined
-
-
+diags <- banana_result$diagnostics  
 grid.arrange(
   diags$rwmh$trace_plot, diags$adaptive$trace_plot, diags$bo_tuned$trace_plot,
   diags$rwmh$acf_plot, diags$adaptive$acf_plot, diags$bo_tuned$acf_plot,
   ncol=3
 )
 
+#Mixture Distribution
 mixture_result = run_comparison(log_mixture, "Mixture", 5)
-
-diags2 <- mixture_result$diagnostics  # Now 'diags' is defined
-
-
+diags2 <- mixture_result$diagnostics  
 grid.arrange(
   diags2$rwmh$trace_plot, diags2$adaptive$trace_plot, diags2$bo_tuned$trace_plot,
   diags2$rwmh$acf_plot, diags2$adaptive$acf_plot, diags2$bo_tuned$acf_plot,
   ncol=3
 )
 
+#Skew Normal Distribution
 skewnormal_result = run_comparison(function(x) log_skewnormal(x), "Skew-Normal", 3)
-
-diags3 <- skewnormal_result$diagnostics  # Now 'diags' is defined
-
-
+diags3 <- skewnormal_result$diagnostics  
 grid.arrange(
   diags3$rwmh$trace_plot, diags3$adaptive$trace_plot, diags3$bo_tuned$trace_plot,
   diags3$rwmh$acf_plot, diags3$adaptive$acf_plot, diags3$bo_tuned$acf_plot,
